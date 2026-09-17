@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>🎬 Фильмотека ИС</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
+  <style>
+    html, body { margin: 0; height: 100%; background: #0f172a; overflow: hidden; }
+    #app { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; display: block; }
+
+    #auth {
+      position: fixed; inset: 0; z-index: 10;
+      display: none; align-items: center; justify-content: center;
+      padding: 16px; box-sizing: border-box;
+      background: rgba(15, 23, 42, 0.6);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    #auth.show { display: flex; }
+    .card {
+      width: 100%; max-width: 360px; box-sizing: border-box;
+      background: #ffffff; color: #1e293b;
+      border-radius: 16px; padding: 24px 22px 18px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+      text-align: center;
+    }
+    .card .logo { font-size: 40px; line-height: 1; }
+    .card h2 { margin: 10px 0 8px; font-size: 20px; }
+    .card p { margin: 0 0 16px; font-size: 14px; line-height: 1.45; color: #475569; }
+    #gbtn { display: flex; justify-content: center; min-height: 44px; }
+    #status { min-height: 18px; margin: 10px 0 4px; font-size: 13px; color: #475569; }
+    #status.error { color: #dc2626; }
+    #skip {
+      margin-top: 6px; background: none; border: 0; padding: 6px 10px;
+      color: #64748b; font-size: 13px; cursor: pointer; text-decoration: underline;
+    }
+    @media (prefers-color-scheme: dark) {
+      .card { background: #1e293b; color: #e2e8f0; }
+      .card p, #status { color: #94a3b8; }
+    }
+  </style>
+</head>
+<body>
+  <iframe id="app" title="Фильмотека ИС" allow="clipboard-write; fullscreen"></iframe>
+
+  <div id="auth" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+    <div class="card">
+      <div class="logo">🎬</div>
+      <h2 id="authTitle">Вход в Фильмотеку</h2>
+      <p>Войдите через Google, чтобы оценивать, комментировать и вести свой профиль.
+         Вашу почту видит только владелец сайта.</p>
+      <div id="gbtn"></div>
+      <div id="status"></div>
+      <button id="skip" type="button">Пока просто посмотреть</button>
+    </div>
+  </div>
+
+  <script>
+    // =====================================================================
+    // НАСТРОЙКИ — заполнить (см. инструкцию, шаги 2 и 4)
+    // =====================================================================
+    // Ссылка веб-приложения Apps Script (Развернуть → Управление развертываниями → URL)
+    const APP_URL = 'https://script.google.com/macros/s/AKfycbw6A-4F2E3vBEXsCT8PePmyQSnEO74vQssWY5GuddPrFLRFkIMgDlSckKxaEViIgFXkcg/exec';
+    // Client ID из Google Cloud Console — ТОТ ЖЕ, что в Code.gs (AUTH_GOOGLE_CLIENT_ID)
+    const CLIENT_ID = '214245423469-7dbfgrrk6k880bsktva3kg2e2to8qldd.apps.googleusercontent.com';
+    // =====================================================================
+
+    // Страница приложения Apps Script живёт на адресе вида
+    // https://n-xxxxxxxx-0lu-script.googleusercontent.com — только от таких
+    // адресов и только из нашего же iframe принимаем сообщения.
+    const APP_ORIGIN_RE = /^https:\/\/[a-z0-9-]+-script\.googleusercontent\.com$/;
+
+    const frame = document.getElementById('app');
+    const overlay = document.getElementById('auth');
+    const btnBox = document.getElementById('gbtn');
+    const statusEl = document.getElementById('status');
+
+    let appWin = null;          // окно приложения (внутренний iframe Apps Script)
+    let appOrigin = null;       // его адрес — только ему уходит токен
+    let pendingNonce = '';      // nonce, выданный сервером для этой попытки входа
+    let initializedNonce = '';  // с каким nonce инициализирован Google-вход
+    let gisReady = false;       // загрузилась ли библиотека Google
+    let gisFailed = false;
+
+    const configured = APP_URL.indexOf('ВСТАВЬТЕ') === -1 && CLIENT_ID.indexOf('ВСТАВЬТЕ') === -1;
+
+    function setStatus(text, isError) {
+      statusEl.textContent = text || '';
+      statusEl.classList.toggle('error', !!isError);
+    }
+
+    /** Сообщение пришло из нашего iframe (из любой его глубины)? */
+    function isFromOurFrame(source) {
+      let w = source;
+      for (let i = 0; i < 6 && w; i++) {
+        if (w === frame.contentWindow) return true;
+        let parent;
+        try { parent = w.parent; } catch (e) { return false; }
+        if (!parent || parent === w) return false;
+        w = parent;
+      }
+      return false;
+    }
+
+    function send(msg) {
+      if (!appWin || !appOrigin) return;
+      appWin.postMessage(Object.assign({ source: 'filmoteka-wrapper' }, msg), appOrigin);
+    }
+
+    window.addEventListener('message', function (ev) {
+      const d = ev.data;
+      if (!d || typeof d !== 'object' || d.source !== 'filmoteka-app') return;
+      const originOk = APP_ORIGIN_RE.test(ev.origin);
+      if (!originOk || !isFromOurFrame(ev.source)) {
+        console.warn('⚠️ Обёртка: сообщение от неожиданного источника отклонено:', ev.origin);
+        return;
+      }
+      appWin = ev.source;
+      appOrigin = ev.origin;
+
+      switch (d.type) {
+        case 'ping':
+          send({ type: 'hello' });
+          break;
+        case 'need-login':
+          showLogin(String(d.nonce || ''), d.error ? String(d.error) : '');
+          break;
+        case 'login-done':
+          hideLogin();
+          break;
+        case 'login-error':
+          setStatus(String(d.message || 'Не удалось войти'), true);
+          break;
+        case 'logout':
+          if (gisReady) google.accounts.id.disableAutoSelect();
+          break;
+      }
+    });
+
+    function showLogin(nonce, error) {
+      if (!nonce) return;
+      pendingNonce = nonce;
+      overlay.classList.add('show');
+      send({ type: 'login-shown' });
+      setStatus(error, !!error);
+      if (!configured) { setStatus('Вход ещё не настроен: в обёртке не заполнены APP_URL и CLIENT_ID', true); return; }
+      if (gisFailed) { setStatus('Не удалось загрузить вход Google. Отключите блокировщик рекламы для этого сайта и обновите страницу.', true); return; }
+      if (gisReady) renderGoogle();
+      else if (!error) setStatus('Загружаю вход Google…');
+    }
+
+    function hideLogin() {
+      overlay.classList.remove('show');
+      pendingNonce = '';
+      setStatus('');
+      if (gisReady) { try { google.accounts.id.cancel(); } catch (e) { /* подсказки могло и не быть */ } }
+    }
+
+    function renderGoogle() {
+      if (!pendingNonce || !gisReady) return;
+      if (initializedNonce !== pendingNonce) {
+        // nonce у каждой попытки свой — сервер сверит его с тем, что выдал этой сессии
+        google.accounts.id.initialize({
+          client_id: CLIENT_ID,
+          callback: onCredential,
+          nonce: pendingNonce,
+          auto_select: true,
+          cancel_on_tap_outside: false,
+          context: 'signin',
+          ux_mode: 'popup',
+          use_fedcm_for_prompt: true
+        });
+        initializedNonce = pendingNonce;
+      }
+      btnBox.innerHTML = '';
+      google.accounts.id.renderButton(btnBox, {
+        type: 'standard', theme: 'filled_blue', size: 'large',
+        text: 'signin_with', shape: 'pill', locale: 'ru', width: 260
+      });
+      if (statusEl.textContent === 'Загружаю вход Google…') setStatus('');
+      google.accounts.id.prompt();   // быстрый вход в один клик, если браузер разрешит
+    }
+
+    function onCredential(resp) {
+      if (!resp || !resp.credential) return;
+      setStatus('Проверяю вход…');
+      send({ type: 'credential', credential: resp.credential });
+    }
+
+    document.getElementById('skip').addEventListener('click', function () {
+      hideLogin();
+      send({ type: 'login-closed' });
+    });
+
+    // Вызываются тегом библиотеки ниже
+    function gisLoaded() {
+      gisReady = true;
+      if (pendingNonce) renderGoogle();
+    }
+    function gisError() {
+      gisFailed = true;
+      if (pendingNonce) setStatus('Не удалось загрузить вход Google. Отключите блокировщик рекламы для этого сайта и обновите страницу.', true);
+    }
+
+    // Приложение грузим только после того, как слушатель сообщений уже стоит
+    if (APP_URL.indexOf('ВСТАВЬТЕ') === -1) {
+      frame.src = APP_URL;
+    } else {
+      document.body.insertAdjacentHTML('beforeend',
+        '<p style="color:#fff;font-family:sans-serif;padding:24px;position:relative;">' +
+        'Обёртка не настроена: впишите APP_URL и CLIENT_ID в index.html.</p>');
+    }
+  </script>
+  <script src="https://accounts.google.com/gsi/client" async defer onload="gisLoaded()" onerror="gisError()"></script>
+</body>
+</html>
