@@ -4,20 +4,22 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="strict-origin-when-cross-origin">
-  <title>Фильмотека ИС</title>
+  <title>🎬 Фильмотека ИС</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
   <style>
     html, body { margin: 0; height: 100%; background: #0f172a; overflow: hidden; }
     #app { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; display: block; }
 
-    #auth {
+    #auth, #fallback {
       position: fixed; inset: 0; z-index: 10;
       display: none; align-items: center; justify-content: center;
       padding: 16px; box-sizing: border-box;
       background: rgba(15, 23, 42, 0.6);
       font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     }
-    #auth.show { display: flex; }
+    #auth.show, #fallback.show { display: flex; }
+    #fstatus { min-height: 18px; margin: 10px 0 4px; font-size: 13px; color: #475569; }
+    #fstatus.error { color: #dc2626; }
     .card {
       width: 100%; max-width: 360px; box-sizing: border-box;
       background: #ffffff; color: #1e293b;
@@ -31,10 +33,11 @@
     #gbtn { display: flex; justify-content: center; min-height: 44px; }
     #status { min-height: 18px; margin: 10px 0 4px; font-size: 13px; color: #475569; }
     #status.error { color: #dc2626; }
-    #skip {
+    #skip, #openPlain {
       margin-top: 6px; background: none; border: 0; padding: 6px 10px;
       color: #64748b; font-size: 13px; cursor: pointer; text-decoration: underline;
     }
+    #openPlain { display: inline-block; }
     @media (prefers-color-scheme: dark) {
       .card { background: #1e293b; color: #e2e8f0; }
       .card p, #status { color: #94a3b8; }
@@ -43,6 +46,18 @@
 </head>
 <body>
   <iframe id="app" title="Фильмотека ИС" allow="clipboard-write; fullscreen"></iframe>
+
+  <!-- Запасной путь: браузер не показывает сайт внутри страницы (Safari на iPhone) -->
+  <div id="fallback" role="dialog" aria-modal="true">
+    <div class="card">
+      <div class="logo">🎬</div>
+      <h2>Фильмотека ИС</h2>
+      <p>Ваш браузер не открывает сайт внутри этой страницы. Войдите — и сайт откроется напрямую.</p>
+      <div id="fbtn"></div>
+      <div id="fstatus"></div>
+      <a id="openPlain" href="#">Открыть без входа</a>
+    </div>
+  </div>
 
   <div id="auth" role="dialog" aria-modal="true" aria-labelledby="authTitle">
     <div class="card">
@@ -61,9 +76,9 @@
     // НАСТРОЙКИ — заполнить (см. инструкцию, шаги 2 и 4)
     // =====================================================================
     // Ссылка веб-приложения Apps Script (Развернуть → Управление развертываниями → URL)
-    const APP_URL = 'https://script.google.com/macros/s/AKfycbw6A-4F2E3vBEXsCT8PePmyQSnEO74vQssWY5GuddPrFLRFkIMgDlSckKxaEViIgFXkcg/exec';
+    const APP_URL = 'https://script.google.com/macros/s/ВСТАВЬТЕ_ID_РАЗВЕРТЫВАНИЯ/exec';
     // Client ID из Google Cloud Console — ТОТ ЖЕ, что в Code.gs (AUTH_GOOGLE_CLIENT_ID)
-    const CLIENT_ID = '214245423469-7dbfgrrk6k880bsktva3kg2e2to8qldd.apps.googleusercontent.com';
+    const CLIENT_ID = 'ВСТАВЬТЕ_CLIENT_ID.apps.googleusercontent.com';
     // =====================================================================
 
     // Страница приложения Apps Script живёт на адресе вида
@@ -76,6 +91,7 @@
     const btnBox = document.getElementById('gbtn');
     const statusEl = document.getElementById('status');
 
+    let fallbackShown = false;  // сайт не открылся внутри страницы — входим и открываем напрямую
     let appWin = null;          // окно приложения (внутренний iframe Apps Script)
     let appOrigin = null;       // его адрес — только ему уходит токен
     let pendingNonce = '';      // nonce, выданный сервером для этой попытки входа
@@ -91,6 +107,68 @@
     }
 
     /** Сообщение пришло из нашего iframe (из любой его глубины)? */
+    /**
+     * Safari на iPhone (и любой браузер со строгими настройками) не пускает
+     * страницу Google внутрь чужого сайта: приложение не загружается и молчит.
+     * Тогда показываем вход прямо здесь, а страницу открываем напрямую —
+     * токен уходит формой (POST), а не в адресной строке.
+     */
+    function showFallback() {
+      if (fallbackShown) return;
+      fallbackShown = true;
+      console.warn('⚠️ Обёртка: приложение не отозвалось — показываю прямой вход');
+      frame.style.display = 'none';
+      overlay.classList.remove('show');
+      document.getElementById('fallback').classList.add('show');
+      document.getElementById('openPlain').setAttribute('href', APP_URL);
+      if (!configured) { setFStatus('Вход ещё не настроен: в обёртке не заполнены APP_URL и CLIENT_ID', true); return; }
+      if (gisFailed) { setFStatus('Не удалось загрузить вход Google. Отключите блокировщик рекламы и обновите страницу.', true); return; }
+      if (gisReady) renderFallbackButton();
+      else setFStatus('Загружаю вход Google…');
+    }
+
+    function setFStatus(text, isError) {
+      const el = document.getElementById('fstatus');
+      el.textContent = text || '';
+      el.classList.toggle('error', !!isError);
+    }
+
+    function renderFallbackButton() {
+      google.accounts.id.initialize({
+        client_id: CLIENT_ID,
+        callback: onFallbackCredential,
+        auto_select: false,
+        cancel_on_tap_outside: true,
+        context: 'signin',
+        ux_mode: 'popup'
+      });
+      initializedNonce = '';   // обычный вход потом переинициализируется со своим nonce
+      const box = document.getElementById('fbtn');
+      box.innerHTML = '';
+      google.accounts.id.renderButton(box, {
+        type: 'standard', theme: 'filled_blue', size: 'large',
+        text: 'signin_with', shape: 'pill', locale: 'ru', width: 260
+      });
+      setFStatus('');
+    }
+
+    /** Токен уходит в Apps Script телом запроса — в адресной строке его не остаётся */
+    function onFallbackCredential(resp) {
+      if (!resp || !resp.credential) return;
+      setFStatus('Открываю сайт…');
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = APP_URL;
+      form.style.display = 'none';
+      const input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = 'credential';
+      input.value = resp.credential;
+      form.appendChild(input);
+      document.body.appendChild(form);
+      form.submit();
+    }
+
     function isFromOurFrame(source) {
       let w = source;
       for (let i = 0; i < 6 && w; i++) {
@@ -118,6 +196,7 @@
       }
       appWin = ev.source;
       appOrigin = ev.origin;
+      clearTimeout(aliveTimer);   // приложение отозвалось — запасной путь не нужен
 
       switch (d.type) {
         case 'ping':
@@ -196,16 +275,21 @@
     // Вызываются тегом библиотеки ниже
     function gisLoaded() {
       gisReady = true;
-      if (pendingNonce) renderGoogle();
+      if (fallbackShown) renderFallbackButton();
+      else if (pendingNonce) renderGoogle();
     }
     function gisError() {
       gisFailed = true;
-      if (pendingNonce) setStatus('Не удалось загрузить вход Google. Отключите блокировщик рекламы для этого сайта и обновите страницу.', true);
+      if (fallbackShown) setFStatus('Не удалось загрузить вход Google. Отключите блокировщик рекламы и обновите страницу.', true);
+      else if (pendingNonce) setStatus('Не удалось загрузить вход Google. Отключите блокировщик рекламы для этого сайта и обновите страницу.', true);
     }
 
-    // Приложение грузим только после того, как слушатель сообщений уже стоит
+    // Приложение грузим только после того, как слушатель сообщений уже стоит.
+    // Если за 8 секунд оно не отозвалось — значит, браузер не пускает его внутрь.
+    let aliveTimer = null;
     if (APP_URL.indexOf('ВСТАВЬТЕ') === -1) {
       frame.src = APP_URL;
+      aliveTimer = setTimeout(showFallback, 8000);
     } else {
       document.body.insertAdjacentHTML('beforeend',
         '<p style="color:#fff;font-family:sans-serif;padding:24px;position:relative;">' +
