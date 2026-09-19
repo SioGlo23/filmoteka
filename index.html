@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="strict-origin-when-cross-origin">
-  <title>🎬 Фильмотека ИС</title>
+  <title>Фильмотека ИС</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
   <style>
     html, body { margin: 0; height: 100%; background: #0f172a; overflow: hidden; }
@@ -33,7 +33,7 @@
     #gbtn { display: flex; justify-content: center; min-height: 44px; }
     #status { min-height: 18px; margin: 10px 0 4px; font-size: 13px; color: #475569; }
     #status.error { color: #dc2626; }
-    #skip, #openPlain {
+    #skip, #openPlain, .link-btn {
       margin-top: 6px; background: none; border: 0; padding: 6px 10px;
       color: #64748b; font-size: 13px; cursor: pointer; text-decoration: underline;
     }
@@ -55,6 +55,7 @@
       <p>Ваш браузер не открывает сайт внутри этой страницы. Войдите — и сайт откроется напрямую.</p>
       <div id="fbtn"></div>
       <div id="fstatus"></div>
+      <button type="button" id="retryBtn" class="link-btn">Попробовать ещё раз</button>
       <a id="openPlain" href="#">Открыть без входа</a>
     </div>
   </div>
@@ -92,6 +93,8 @@
     const statusEl = document.getElementById('status');
 
     let fallbackShown = false;  // сайт не открылся внутри страницы — входим и открываем напрямую
+    let appAlive = false;       // приложение хотя бы раз отозвалось в этой вкладке
+    let retried = false;        // одну молчаливую перезагрузку делаем сами
     let appWin = null;          // окно приложения (внутренний iframe Apps Script)
     let appOrigin = null;       // его адрес — только ему уходит токен
     let pendingNonce = '';      // nonce, выданный сервером для этой попытки входа
@@ -113,6 +116,29 @@
      * Тогда показываем вход прямо здесь, а страницу открываем напрямую —
      * токен уходит формой (POST), а не в адресной строке.
      */
+    /**
+     * Приложение долго молчит. Сначала пробуем просто перезагрузить его
+     * (после спящего режима Apps Script нередко отвечает не с первого раза),
+     * и только если и это не помогло — показываем прямой вход.
+     */
+    function appSilent() {
+      if (appAlive || fallbackShown) return;
+      if (!retried) {
+        retried = true;
+        console.warn('⚠️ Обёртка: приложение молчит — перезагружаю его');
+        setStatus('');
+        frame.src = APP_URL + (APP_URL.indexOf('?') === -1 ? '?' : '&') + 'r=' + Date.now();
+        armAliveTimer(18000);
+        return;
+      }
+      showFallback();
+    }
+
+    function armAliveTimer(ms) {
+      clearTimeout(aliveTimer);
+      aliveTimer = setTimeout(appSilent, ms);
+    }
+
     function showFallback() {
       if (fallbackShown) return;
       fallbackShown = true;
@@ -197,6 +223,15 @@
       appWin = ev.source;
       appOrigin = ev.origin;
       clearTimeout(aliveTimer);   // приложение отозвалось — запасной путь не нужен
+      if (!appAlive) {
+        appAlive = true;
+        try { localStorage.setItem('filmoteka-iframe-ok', '1'); } catch (e) { /* хранилище может быть закрыто */ }
+        if (fallbackShown) {      // приложение всё-таки ожило — возвращаем его на экран
+          fallbackShown = false;
+          document.getElementById('fallback').classList.remove('show');
+          frame.style.display = '';
+        }
+      }
 
       switch (d.type) {
         case 'ping':
@@ -267,6 +302,15 @@
       send({ type: 'credential', credential: resp.credential });
     }
 
+    document.getElementById('retryBtn').addEventListener('click', function () {
+      fallbackShown = false;
+      retried = false;
+      document.getElementById('fallback').classList.remove('show');
+      frame.style.display = '';
+      frame.src = APP_URL + (APP_URL.indexOf('?') === -1 ? '?' : '&') + 'r=' + Date.now();
+      armAliveTimer(20000);
+    });
+
     document.getElementById('skip').addEventListener('click', function () {
       hideLogin();
       send({ type: 'login-closed' });
@@ -288,8 +332,20 @@
     // Если за 8 секунд оно не отозвалось — значит, браузер не пускает его внутрь.
     let aliveTimer = null;
     if (APP_URL.indexOf('ВСТАВЬТЕ') === -1) {
+      // Если в этом браузере сайт уже открывался внутри страницы, ждём дольше:
+      // значит, дело не в запрете, а в том, что Apps Script просто задумался
+      let known = false;
+      try { known = localStorage.getItem('filmoteka-iframe-ok') === '1'; } catch (e) { known = false; }
       frame.src = APP_URL;
-      aliveTimer = setTimeout(showFallback, 8000);
+      armAliveTimer(known ? 25000 : 12000);
+      // Страница внутри загрузилась, но молчит — ждём ещё немного и решаем
+      frame.addEventListener('load', () => { if (!appAlive && !fallbackShown) armAliveTimer(known ? 15000 : 8000); });
+      // Во сне вкладки таймер идёт, а приложение не грузится: после пробуждения
+      // отсчёт начинается заново, иначе запасное окно вылезало бы на ровном месте
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState !== 'visible' || appAlive || fallbackShown) return;
+        armAliveTimer(known ? 20000 : 10000);
+      });
     } else {
       document.body.insertAdjacentHTML('beforeend',
         '<p style="color:#fff;font-family:sans-serif;padding:24px;position:relative;">' +
