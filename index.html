@@ -87,6 +87,21 @@
     // адресов и только из нашего же iframe принимаем сообщения.
     const APP_ORIGIN_RE = /^https:\/\/[a-z0-9-]+-script\.googleusercontent\.com$/;
 
+    // 🔗 Ссылка на фильм или профиль: эта страница?film=123 → приложение?film=123.
+    // Пропускаем только эти два параметра и только цифры — больше ничего.
+    const LINK_QUERY = (function () {
+      try {
+        const q = new URLSearchParams(location.search);
+        const out = [];
+        ['film', 'profile'].forEach(function (k) {
+          const v = String(q.get(k) || '').trim();
+          if (/^\d{1,12}$/.test(v) && !/^0+$/.test(v)) out.push(k + '=' + v);
+        });
+        return out.join('&');
+      } catch (e) { return ''; }
+    })();
+    const APP_SRC = APP_URL + (LINK_QUERY ? (APP_URL.indexOf('?') === -1 ? '?' : '&') + LINK_QUERY : '');
+
     const frame = document.getElementById('app');
     const overlay = document.getElementById('auth');
     const btnBox = document.getElementById('gbtn');
@@ -127,7 +142,7 @@
         retried = true;
         console.warn('⚠️ Обёртка: приложение молчит — перезагружаю его');
         setStatus('');
-        frame.src = APP_URL + (APP_URL.indexOf('?') === -1 ? '?' : '&') + 'r=' + Date.now();
+        frame.src = APP_SRC + (APP_SRC.indexOf('?') === -1 ? '?' : '&') + 'r=' + Date.now();
         armAliveTimer(18000);
         return;
       }
@@ -146,7 +161,7 @@
       frame.style.display = 'none';
       overlay.classList.remove('show');
       document.getElementById('fallback').classList.add('show');
-      document.getElementById('openPlain').setAttribute('href', APP_URL);
+      document.getElementById('openPlain').setAttribute('href', APP_SRC);
       if (!configured) { setFStatus('Вход ещё не настроен: в обёртке не заполнены APP_URL и CLIENT_ID', true); return; }
       if (gisFailed) { setFStatus('Не удалось загрузить вход Google. Отключите блокировщик рекламы и обновите страницу.', true); return; }
       if (gisReady) renderFallbackButton();
@@ -184,7 +199,7 @@
       setFStatus('Открываю сайт…');
       const form = document.createElement('form');
       form.method = 'POST';
-      form.action = APP_URL;
+      form.action = APP_SRC;   // с номером фильма/профиля из ссылки, если он есть
       form.style.display = 'none';
       const input = document.createElement('input');
       input.type = 'hidden';
@@ -307,7 +322,7 @@
       retried = false;
       document.getElementById('fallback').classList.remove('show');
       frame.style.display = '';
-      frame.src = APP_URL + (APP_URL.indexOf('?') === -1 ? '?' : '&') + 'r=' + Date.now();
+      frame.src = APP_SRC + (APP_SRC.indexOf('?') === -1 ? '?' : '&') + 'r=' + Date.now();
       armAliveTimer(20000);
     });
 
@@ -336,7 +351,7 @@
       // значит, дело не в запрете, а в том, что Apps Script просто задумался
       let known = false;
       try { known = localStorage.getItem('filmoteka-iframe-ok') === '1'; } catch (e) { known = false; }
-      frame.src = APP_URL;
+      frame.src = APP_SRC;
       armAliveTimer(known ? 25000 : 12000);
       // Страница внутри загрузилась, но молчит — ждём ещё немного и решаем
       frame.addEventListener('load', () => { if (!appAlive && !fallbackShown) armAliveTimer(known ? 15000 : 8000); });
