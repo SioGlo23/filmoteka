@@ -116,6 +116,8 @@
     let initializedNonce = '';  // с каким nonce инициализирован Google-вход
     let gisReady = false;       // загрузилась ли библиотека Google
     let gisFailed = false;
+    let failedBefore = false;   // в этом браузере сайт внутри страницы уже не открывался
+    try { failedBefore = localStorage.getItem('filmoteka-iframe-fail') === '1'; } catch (e) { failedBefore = false; }
 
     const configured = APP_URL.indexOf('ВСТАВЬТЕ') === -1 && CLIENT_ID.indexOf('ВСТАВЬТЕ') === -1;
 
@@ -138,7 +140,8 @@
      */
     function appSilent() {
       if (appAlive || fallbackShown) return;
-      if (!retried) {
+      // Здесь сайт внутри страницы уже не открывался — тихую перезагрузку не ждём
+      if (!retried && !failedBefore) {
         retried = true;
         console.warn('⚠️ Обёртка: приложение молчит — перезагружаю его');
         setStatus('');
@@ -157,6 +160,8 @@
     function showFallback() {
       if (fallbackShown) return;
       fallbackShown = true;
+      // Запомним: в этом браузере сайт внутри страницы не открылся — в следующий раз ждём недолго
+      try { localStorage.setItem('filmoteka-iframe-fail', '1'); } catch (e) { /* хранилище может быть закрыто */ }
       console.warn('⚠️ Обёртка: приложение не отозвалось — показываю прямой вход');
       frame.style.display = 'none';
       overlay.classList.remove('show');
@@ -193,22 +198,20 @@
       setFStatus('');
     }
 
-    /** Токен уходит в Apps Script телом запроса — в адресной строке его не остаётся */
+    /**
+     * Переходим на сайт ОБЫЧНОЙ ССЫЛКОЙ (GET), а токен кладём в «хвост» адреса
+     * после # — он не уходит ни на один сервер; сайт сам прочитает его и сразу
+     * сотрёт из адресной строки. Раньше здесь была отправка формой (POST), но
+     * Safari на iPhone может не приложить к такому переходу куки Google — и
+     * Apps Script отвечал «Ошибка 401», не открыв сайт. На обычный переход куки
+     * прикладываются, а без входа в Google тот сам покажет вход.
+     */
     function onFallbackCredential(resp) {
       if (!resp || !resp.credential) return;
       setFStatus('Открываю сайт…');
-      const form = document.createElement('form');
-      form.method = 'POST';
-      form.action = APP_SRC;   // с номером фильма/профиля из ссылки, если он есть
-      form.style.display = 'none';
-      const input = document.createElement('input');
-      input.type = 'hidden';
-      input.name = 'credential';
-      input.value = resp.credential;
-      form.appendChild(input);
-      document.body.appendChild(form);
-      form.submit();
+      goToApp(APP_SRC + '#fl=' + encodeURIComponent(resp.credential));
     }
+    function goToApp(url) { window.location.assign(url); }
 
     function isFromOurFrame(source) {
       let w = source;
@@ -240,7 +243,7 @@
       clearTimeout(aliveTimer);   // приложение отозвалось — запасной путь не нужен
       if (!appAlive) {
         appAlive = true;
-        try { localStorage.setItem('filmoteka-iframe-ok', '1'); } catch (e) { /* хранилище может быть закрыто */ }
+        try { localStorage.setItem('filmoteka-iframe-ok', '1'); localStorage.removeItem('filmoteka-iframe-fail'); } catch (e) { /* хранилище может быть закрыто */ }
         if (fallbackShown) {      // приложение всё-таки ожило — возвращаем его на экран
           fallbackShown = false;
           document.getElementById('fallback').classList.remove('show');
@@ -352,9 +355,11 @@
       let known = false;
       try { known = localStorage.getItem('filmoteka-iframe-ok') === '1'; } catch (e) { known = false; }
       frame.src = APP_SRC;
-      armAliveTimer(known ? 25000 : 12000);
+      // В браузере, где сайт внутри страницы уже не открывался (Safari на iPhone),
+      // запасной вход показываем через несколько секунд, а не через полминуты
+      armAliveTimer(known ? 25000 : (failedBefore ? 6000 : 12000));
       // Страница внутри загрузилась, но молчит — ждём ещё немного и решаем
-      frame.addEventListener('load', () => { if (!appAlive && !fallbackShown) armAliveTimer(known ? 15000 : 8000); });
+      frame.addEventListener('load', () => { if (!appAlive && !fallbackShown) armAliveTimer(known ? 15000 : (failedBefore ? 4000 : 8000)); });
       // Во сне вкладки таймер идёт, а приложение не грузится: после пробуждения
       // отсчёт начинается заново, иначе запасное окно вылезало бы на ровном месте
       document.addEventListener('visibilitychange', () => {
