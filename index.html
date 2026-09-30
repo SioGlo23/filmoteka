@@ -36,11 +36,16 @@
     #skip, #openPlain, .link-btn {
       margin-top: 6px; background: none; border: 0; padding: 6px 10px;
       color: #64748b; font-size: 13px; cursor: pointer; text-decoration: underline;
+      font-family: inherit;
     }
     #openPlain { display: inline-block; }
+    .card .hint { margin: 14px 0 0; font-size: 12.5px; line-height: 1.45; color: #64748b; }
+    #inAppHint.strong .hint { color: #b45309; font-size: 13.5px; }
     @media (prefers-color-scheme: dark) {
       .card { background: #1e293b; color: #e2e8f0; }
       .card p, #status { color: #94a3b8; }
+      .card .hint { color: #94a3b8; }
+      #inAppHint.strong .hint { color: #fbbf24; }
     }
   </style>
 </head>
@@ -52,11 +57,17 @@
     <div class="card">
       <div class="logo">🎬</div>
       <h2>Фильмотека ИС</h2>
-      <p>Ваш браузер не открывает сайт внутри этой страницы. Войдите — и сайт откроется напрямую.</p>
+      <p id="ftext">Ваш браузер не открывает сайт внутри этой страницы. Войдите — и сайт откроется напрямую.</p>
       <div id="fbtn"></div>
       <div id="fstatus"></div>
       <button type="button" id="retryBtn" class="link-btn">Попробовать ещё раз</button>
       <a id="openPlain" href="#">Открыть без входа</a>
+      <!-- iPhone: ссылка открыта внутри Telegram и т.п. — там вход Google часто не проходит -->
+      <div id="inAppHint" hidden>
+        <p class="hint">Открыли ссылку из Telegram или другого приложения и вход не проходит?
+          Откройте её в Safari: <b>⋯</b> → «Открыть в Safari» (или значок компаса).</p>
+        <button type="button" id="copyLink" class="link-btn">Скопировать ссылку</button>
+      </div>
     </div>
   </div>
 
@@ -121,19 +132,37 @@
 
     const configured = APP_URL.indexOf('ВСТАВЬТЕ') === -1 && CLIENT_ID.indexOf('ВСТАВЬТЕ') === -1;
 
+    // 📱 Где сайт внутри этой страницы не работает НИКОГДА. Google-сайт внутри чужой
+    // страницы видит вход в Google только через «сторонние» куки, а их всегда
+    // закрывают: все браузеры на iPhone/iPad (внутри у всех Safari), Safari на Mac
+    // и Firefox. Там вместо сайта Google показывает «401. That's an error» —
+    // поэтому сразу открываем сайт напрямую, не показывая эту ошибку.
+    const UA = String(navigator.userAgent || '');
+    const IS_IOS = /iPhone|iPad|iPod/.test(UA) || (/Macintosh/.test(UA) && navigator.maxTouchPoints > 1);
+    const IS_MAC_SAFARI = !IS_IOS && /Macintosh/.test(UA) && /Version\/[\d.]+.*Safari\//.test(UA) &&
+      !/Chrome|Chromium|Edg|OPR|YaBrowser|Firefox/.test(UA);
+    const IS_FIREFOX = /Firefox\/|FxiOS/.test(UA);
+    const NO_IFRAME = IS_IOS || IS_MAC_SAFARI || IS_FIREFOX;
+    // Встроенный браузер приложения (Telegram, Instagram, ВК…): у обычных браузеров
+    // на iPhone в описании есть «Safari/», у встроенных его часто нет
+    const IN_APP = IS_IOS && (/Telegram|Instagram|FBAN|FBAV|VKClient|Line\//i.test(UA) || !/Safari\//.test(UA));
+    // ?login=1 — пришли из приложения за входом: не открываем сайт сразу, а показываем вход
+    const WANT_LOGIN = (function () {
+      try { return new URLSearchParams(location.search).get('login') === '1'; } catch (e) { return false; }
+    })();
+    let directMode = false;     // сайт открываем напрямую (без iframe)
+
     function setStatus(text, isError) {
       statusEl.textContent = text || '';
       statusEl.classList.toggle('error', !!isError);
     }
 
-    /** Сообщение пришло из нашего iframe (из любой его глубины)? */
     /**
-     * Safari на iPhone (и любой браузер со строгими настройками) не пускает
-     * страницу Google внутрь чужого сайта: приложение не загружается и молчит.
-     * Тогда показываем вход прямо здесь, а страницу открываем напрямую —
-     * токен уходит формой (POST), а не в адресной строке.
-     */
-    /**
+     * Браузер со строгими настройками (например, Chrome в режиме инкогнито) не
+     * пускает страницу Google внутрь чужого сайта: приложение не загружается и
+     * молчит. Тогда показываем вход прямо здесь, а сайт открываем напрямую.
+     * (iPhone, Safari и Firefox сюда не доходят — там прямой режим сразу, см. startDirect.)
+     *
      * Приложение долго молчит. Сначала пробуем просто перезагрузить его
      * (после спящего режима Apps Script нередко отвечает не с первого раза),
      * и только если и это не помогло — показываем прямой вход.
@@ -161,12 +190,24 @@
       if (fallbackShown) return;
       fallbackShown = true;
       // Запомним: в этом браузере сайт внутри страницы не открылся — в следующий раз ждём недолго
-      try { localStorage.setItem('filmoteka-iframe-fail', '1'); } catch (e) { /* хранилище может быть закрыто */ }
-      console.warn('⚠️ Обёртка: приложение не отозвалось — показываю прямой вход');
+      if (!directMode) { try { localStorage.setItem('filmoteka-iframe-fail', '1'); } catch (e) { /* хранилище может быть закрыто */ } }
+      console.warn(directMode ? 'ℹ️ Обёртка: в этом браузере сайт открывается напрямую'
+                              : '⚠️ Обёртка: приложение не отозвалось — показываю прямой вход');
       frame.style.display = 'none';
       overlay.classList.remove('show');
       document.getElementById('fallback').classList.add('show');
       document.getElementById('openPlain').setAttribute('href', APP_SRC);
+      if (directMode) {
+        document.getElementById('ftext').textContent = IS_IOS
+          ? 'На iPhone и iPad сайт открывается напрямую. Войдите через Google — и он откроется с вашим профилем.'
+          : 'В этом браузере сайт открывается напрямую. Войдите через Google — и он откроется с вашим профилем.';
+        document.getElementById('retryBtn').style.display = 'none';   // внутри страницы здесь не заработает
+      }
+      if (IS_IOS) {
+        const hint = document.getElementById('inAppHint');
+        hint.hidden = false;
+        hint.classList.toggle('strong', IN_APP);
+      }
       if (!configured) { setFStatus('Вход ещё не настроен: в обёртке не заполнены APP_URL и CLIENT_ID', true); return; }
       if (gisFailed) { setFStatus('Не удалось загрузить вход Google. Отключите блокировщик рекламы и обновите страницу.', true); return; }
       if (gisReady) renderFallbackButton();
@@ -209,10 +250,38 @@
     function onFallbackCredential(resp) {
       if (!resp || !resp.credential) return;
       setFStatus('Открываю сайт…');
+      rememberDirect();
       goToApp(APP_SRC + '#fl=' + encodeURIComponent(resp.credential));
     }
-    function goToApp(url) { window.location.assign(url); }
+    // replace, а не assign: кнопка «Назад» из сайта не вернёт на эту промежуточную страницу
+    function goToApp(url) { window.location.replace(url); }
+    /** Здесь уже входили и открывали сайт напрямую — в следующий раз откроем его сразу */
+    function rememberDirect() {
+      if (!directMode) return;
+      try { localStorage.setItem('filmoteka-direct-ok', '1'); } catch (e) { /* хранилище может быть закрыто */ }
+    }
 
+    /**
+     * Прямой режим (iPhone, Safari, Firefox): страницу Google внутрь не грузим вовсе.
+     * Уже входили здесь — сразу открываем сайт (Google помнит вход, сервер — привязку
+     * почты), иначе — окно с кнопкой Google и «Открыть без входа».
+     */
+    function startDirect() {
+      directMode = true;
+      frame.style.display = 'none';
+      let known = false;
+      try { known = localStorage.getItem('filmoteka-direct-ok') === '1'; } catch (e) { known = false; }
+      if (known && !WANT_LOGIN) {
+        showFallback();
+        document.getElementById('ftext').textContent = 'Открываю Фильмотеку…';
+        setFStatus('');
+        setTimeout(function () { goToApp(APP_SRC); }, 0);   // сначала надпись, потом переход
+        return;
+      }
+      showFallback();
+    }
+
+    /** Сообщение пришло из нашего iframe (из любой его глубины)? */
     function isFromOurFrame(source) {
       let w = source;
       for (let i = 0; i < 6 && w; i++) {
@@ -329,6 +398,18 @@
       armAliveTimer(20000);
     });
 
+    document.getElementById('openPlain').addEventListener('click', function () { rememberDirect(); });
+
+    document.getElementById('copyLink').addEventListener('click', function () {
+      const link = location.origin + location.pathname + (LINK_QUERY ? '?' + LINK_QUERY : '');
+      const done = function () { setFStatus('Ссылка скопирована — вставьте её в Safari'); };
+      const manual = function () { setFStatus('Скопируйте ссылку вручную: ' + link); };
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, manual);
+        else manual();
+      } catch (e) { manual(); }
+    });
+
     document.getElementById('skip').addEventListener('click', function () {
       hideLogin();
       send({ type: 'login-closed' });
@@ -349,11 +430,20 @@
     // Приложение грузим только после того, как слушатель сообщений уже стоит.
     // Если за 8 секунд оно не отозвалось — значит, браузер не пускает его внутрь.
     let aliveTimer = null;
-    if (APP_URL.indexOf('ВСТАВЬТЕ') === -1) {
-      // Если в этом браузере сайт уже открывался внутри страницы, ждём дольше:
-      // значит, дело не в запрете, а в том, что Apps Script просто задумался
-      let known = false;
-      try { known = localStorage.getItem('filmoteka-iframe-ok') === '1'; } catch (e) { known = false; }
+    // Если в этом браузере сайт уже открывался внутри страницы, ждём дольше:
+    // значит, дело не в запрете, а в том, что Apps Script просто задумался.
+    // (Так бывает и на iPhone, если в настройках Safari выключено «Без перекрёстного
+    // отслеживания» — тогда пробуем как обычно.)
+    let iframeKnown = false;
+    try { iframeKnown = localStorage.getItem('filmoteka-iframe-ok') === '1'; } catch (e) { iframeKnown = false; }
+    if (APP_URL.indexOf('ВСТАВЬТЕ') !== -1) {
+      document.body.insertAdjacentHTML('beforeend',
+        '<p style="color:#fff;font-family:sans-serif;padding:24px;position:relative;">' +
+        'Обёртка не настроена: впишите APP_URL и CLIENT_ID в index.html.</p>');
+    } else if (NO_IFRAME && !iframeKnown) {
+      startDirect();
+    } else {
+      const known = iframeKnown;
       frame.src = APP_SRC;
       // В браузере, где сайт внутри страницы уже не открывался (Safari на iPhone),
       // запасной вход показываем через несколько секунд, а не через полминуты
@@ -366,10 +456,6 @@
         if (document.visibilityState !== 'visible' || appAlive || fallbackShown) return;
         armAliveTimer(known ? 20000 : 10000);
       });
-    } else {
-      document.body.insertAdjacentHTML('beforeend',
-        '<p style="color:#fff;font-family:sans-serif;padding:24px;position:relative;">' +
-        'Обёртка не настроена: впишите APP_URL и CLIENT_ID в index.html.</p>');
     }
   </script>
   <script src="https://accounts.google.com/gsi/client" async defer onload="gisLoaded()" onerror="gisError()"></script>
