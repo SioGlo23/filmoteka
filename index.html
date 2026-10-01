@@ -41,11 +41,17 @@
     #openPlain { display: inline-block; }
     .card .hint { margin: 14px 0 0; font-size: 12.5px; line-height: 1.45; color: #64748b; }
     #inAppHint.strong .hint { color: #b45309; font-size: 13.5px; }
+    .safari-btn {
+      display: inline-block; margin-top: 10px; padding: 9px 18px; border-radius: 999px;
+      background: #0f172a; color: #fff; font-size: 14px; font-weight: 600; text-decoration: none;
+    }
+    .safari-btn[hidden] { display: none; }
     @media (prefers-color-scheme: dark) {
       .card { background: #1e293b; color: #e2e8f0; }
       .card p, #status { color: #94a3b8; }
       .card .hint { color: #94a3b8; }
       #inAppHint.strong .hint { color: #fbbf24; }
+      .safari-btn { background: #e2e8f0; color: #0f172a; }
     }
   </style>
 </head>
@@ -64,8 +70,10 @@
       <a id="openPlain" href="#">Открыть без входа</a>
       <!-- iPhone: ссылка открыта внутри Telegram и т.п. — там вход Google часто не проходит -->
       <div id="inAppHint" hidden>
-        <p class="hint">Открыли ссылку из Telegram или другого приложения и вход не проходит?
+        <p class="hint" id="inAppText">Открыли ссылку из Telegram или другого приложения и вход не проходит?
           Откройте её в Safari: <b>⋯</b> → «Открыть в Safari» (или значок компаса).</p>
+        <!-- x-safari-https:// — iOS 17+ открывает такую ссылку в самом Safari -->
+        <a id="openSafari" class="safari-btn" href="#" hidden>Открыть в Safari</a>
         <button type="button" id="copyLink" class="link-btn">Скопировать ссылку</button>
       </div>
     </div>
@@ -143,12 +151,27 @@
       !/Chrome|Chromium|Edg|OPR|YaBrowser|Firefox/.test(UA);
     const IS_FIREFOX = /Firefox\/|FxiOS/.test(UA);
     const NO_IFRAME = IS_IOS || IS_MAC_SAFARI || IS_FIREFOX;
-    // Встроенный браузер приложения (Telegram, Instagram, ВК…): у обычных браузеров
-    // на iPhone в описании есть «Safari/», у встроенных его часто нет
-    const IN_APP = IS_IOS && (/Telegram|Instagram|FBAN|FBAV|VKClient|Line\//i.test(UA) || !/Safari\//.test(UA));
+    // Встроенный браузер приложения (Telegram, Instagram, ВК…). В нём вход Google
+    // часто обрывается на белом экране. Признаки (хоть один):
+    //  • имя приложения в описании браузера;
+    //  • нет «Safari/» в описании (так у встроенных по умолчанию);
+    //  • есть мост приложения window.webkit.messageHandlers — у самого Safari
+    //    его нет. Он есть и у Chrome/Firefox/Яндекса на iPhone, но их видно по
+    //    описанию (CriOS, FxiOS…) — их не трогаем;
+    //  • мост Telegram (TelegramWebviewProxy).
+    const IOS_BROWSER_RE = /CriOS|FxiOS|EdgiOS|OPiOS|OPT\/|YaBrowser|DuckDuckGo|Brave/;
+    const IN_APP = IS_IOS && (/Telegram|Instagram|FBAN|FBAV|VKClient|Line\/\d|GSA\/\d/i.test(UA) || !/Safari\//.test(UA) ||
+      typeof window.TelegramWebviewProxy !== 'undefined' ||
+      (!IOS_BROWSER_RE.test(UA) && !!(window.webkit && window.webkit.messageHandlers)));
     // ?login=1 — пришли из приложения за входом: не открываем сайт сразу, а показываем вход
     const WANT_LOGIN = (function () {
       try { return new URLSearchParams(location.search).get('login') === '1'; } catch (e) { return false; }
+    })();
+    // ?frame=1 — всё равно попробовать сайт внутри страницы (например, на iPhone, где
+    // в настройках Safari выключено «Без перекрёстного отслеживания»). Получилось —
+    // запомним, и дальше на этом устройстве он будет открываться внутри страницы.
+    const FORCE_FRAME = (function () {
+      try { return new URLSearchParams(location.search).get('frame') === '1'; } catch (e) { return false; }
     })();
     let directMode = false;     // сайт открываем напрямую (без iframe)
 
@@ -207,6 +230,14 @@
         const hint = document.getElementById('inAppHint');
         hint.hidden = false;
         hint.classList.toggle('strong', IN_APP);
+        if (IN_APP) {
+          document.getElementById('inAppText').innerHTML = 'Похоже, ссылка открыта внутри Telegram или другого приложения — ' +
+            'там вход Google часто заканчивается белым экраном. Откройте её в Safari: кнопкой ниже или ' +
+            '<b>⋯</b> → «Открыть в Safari».';
+          const safari = document.getElementById('openSafari');
+          safari.setAttribute('href', 'x-safari-' + location.origin + location.pathname + (LINK_QUERY ? '?' + LINK_QUERY : ''));
+          safari.hidden = false;
+        }
       }
       if (!configured) { setFStatus('Вход ещё не настроен: в обёртке не заполнены APP_URL и CLIENT_ID', true); return; }
       if (gisFailed) { setFStatus('Не удалось загрузить вход Google. Отключите блокировщик рекламы и обновите страницу.', true); return; }
@@ -440,7 +471,7 @@
       document.body.insertAdjacentHTML('beforeend',
         '<p style="color:#fff;font-family:sans-serif;padding:24px;position:relative;">' +
         'Обёртка не настроена: впишите APP_URL и CLIENT_ID в index.html.</p>');
-    } else if (NO_IFRAME && !iframeKnown) {
+    } else if (NO_IFRAME && !iframeKnown && !FORCE_FRAME) {
       startDirect();
     } else {
       const known = iframeKnown;
