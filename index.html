@@ -40,7 +40,7 @@
     }
     #openPlain { display: inline-block; }
     .card .hint { margin: 14px 0 0; font-size: 12.5px; line-height: 1.45; color: #64748b; }
-    #inAppHint.strong .hint { color: #b45309; font-size: 13.5px; }
+    #inAppHint.strong .hint, #authInApp .hint { color: #b45309; font-size: 13.5px; }
     .safari-btn {
       display: inline-block; margin-top: 10px; padding: 9px 18px; border-radius: 999px;
       background: #0f172a; color: #fff; font-size: 14px; font-weight: 600; text-decoration: none;
@@ -50,7 +50,7 @@
       .card { background: #1e293b; color: #e2e8f0; }
       .card p, #status { color: #94a3b8; }
       .card .hint { color: #94a3b8; }
-      #inAppHint.strong .hint { color: #fbbf24; }
+      #inAppHint.strong .hint, #authInApp .hint { color: #fbbf24; }
       .safari-btn { background: #e2e8f0; color: #0f172a; }
     }
   </style>
@@ -87,6 +87,12 @@
          Вашу почту видит только владелец сайта.</p>
       <div id="gbtn"></div>
       <div id="status"></div>
+      <!-- встроенный браузер приложения (Telegram…): смотреть можно здесь, входить — в Safari -->
+      <div id="authInApp" hidden>
+        <p class="hint">Вход Google внутри Telegram и других приложений часто обрывается белым экраном.
+          Смотреть сайт можно и здесь, а войти — в Safari.</p>
+        <a id="authSafari" class="safari-btn" href="#">Открыть в Safari</a>
+      </div>
       <button id="skip" type="button">Пока просто посмотреть</button>
     </div>
   </div>
@@ -97,6 +103,10 @@
     // =====================================================================
     // Ссылка веб-приложения Apps Script (Развернуть → Управление развертываниями → URL)
     const APP_URL = 'https://script.google.com/macros/s/AKfycbw6A-4F2E3vBEXsCT8PePmyQSnEO74vQssWY5GuddPrFLRFkIMgDlSckKxaEViIgFXkcg/exec';
+    // 📱 Ссылка ВТОРОГО развёртывания того же проекта — с доступом «Все» (01.10.2026).
+    // Через него сайт открывается внутри этой страницы на iPhone/iPad, в Safari на
+    // Mac и в Firefox. Пусто — на них сайт открывается напрямую, как раньше.
+    const APP_URL_OPEN = 'https://script.google.com/macros/s/AKfycbzfqFlyViqdfQxDNwGgttxpFomK7wZ-SENejcPu6P9UlXcg7NShkT9_fVCg2Wp9Q-Cocg/exec';
     // Client ID из Google Cloud Console — ТОТ ЖЕ, что в Code.gs (AUTH_GOOGLE_CLIENT_ID)
     const CLIENT_ID = '214245423469-7dbfgrrk6k880bsktva3kg2e2to8qldd.apps.googleusercontent.com';
     // =====================================================================
@@ -175,6 +185,44 @@
     })();
     let directMode = false;     // сайт открываем напрямую (без iframe)
 
+    // 📱 Вход по токену: на iPhone, в Safari и Firefox — второе развёртывание
+    // (доступ «Все»). Google там вход не спрашивает, а кто это — сервер узнаёт по
+    // токену сессии. Токен — 32 случайных байта; живёт в хранилище ЭТОЙ страницы
+    // (github.io) и уходит только в Google: в адресе сайта внутри страницы.
+    const OPEN_READY = /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(APP_URL_OPEN) && APP_URL_OPEN !== APP_URL;
+    // Где ещё: браузеры, где основное развёртывание внутри страницы однажды не
+    // открылось, а второе открылось (например, Chrome в режиме инкогнито) — запомнено
+    let useOpenRemembered = false;
+    try { useOpenRemembered = localStorage.getItem('filmoteka-use-open') === '1'; } catch (e) { useOpenRemembered = false; }
+    let TOKEN_MODE = OPEN_READY && !FORCE_FRAME && (NO_IFRAME || useOpenRemembered);
+    // «здесь основной сайт уже не открывался» ко второму развёртыванию не относится
+    if (TOKEN_MODE) failedBefore = false;
+    const SESSION_KEY = 'filmoteka-session';
+    function newSessionToken() {
+      const b = new Uint8Array(32);
+      crypto.getRandomValues(b);
+      let bin = '';
+      for (let i = 0; i < b.length; i++) bin += String.fromCharCode(b[i]);
+      return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+    function sessionToken(renew) {
+      let t = '';
+      if (!renew) { try { t = localStorage.getItem(SESSION_KEY) || ''; } catch (e) { t = ''; } }
+      if (!/^[A-Za-z0-9_-]{40,128}$/.test(t)) {
+        t = newSessionToken();
+        try { localStorage.setItem(SESSION_KEY, t); } catch (e) { /* без хранилища — вход на каждый заход */ }
+      }
+      return t;
+    }
+    function openSrc(token) {
+      return APP_URL_OPEN + '?st=' + encodeURIComponent(token) + (LINK_QUERY ? '&' + LINK_QUERY : '');
+    }
+    // Что сейчас открыто внутри страницы (к нему — перезагрузки)
+    let FRAME_SRC = TOKEN_MODE ? openSrc(sessionToken(false)) : APP_SRC;
+    function reloadFrame() {
+      frame.src = FRAME_SRC + (FRAME_SRC.indexOf('?') === -1 ? '?' : '&') + 'r=' + Date.now();
+    }
+
     function setStatus(text, isError) {
       statusEl.textContent = text || '';
       statusEl.classList.toggle('error', !!isError);
@@ -197,11 +245,25 @@
         retried = true;
         console.warn('⚠️ Обёртка: приложение молчит — перезагружаю его');
         setStatus('');
-        frame.src = APP_SRC + (APP_SRC.indexOf('?') === -1 ? '?' : '&') + 'r=' + Date.now();
+        reloadFrame();
         armAliveTimer(18000);
         return;
       }
+      // Основной сайт внутри страницы не открылся — пробуем второе развёртывание
+      // (вход по токену), и только если и его нет — запасное окно
+      if (OPEN_READY && !TOKEN_MODE && !FORCE_FRAME) { switchToOpen(); return; }
       showFallback();
+    }
+
+    /** Переход на второе развёртывание (вход по токену) прямо в этой вкладке */
+    function switchToOpen() {
+      console.warn('⚠️ Обёртка: основной сайт молчит — открываю второе развёртывание (вход по токену)');
+      TOKEN_MODE = true;
+      failedBefore = false;
+      FRAME_SRC = openSrc(sessionToken(false));
+      frame.style.display = '';
+      reloadFrame();
+      armAliveTimer(20000);
     }
 
     function armAliveTimer(ms) {
@@ -343,7 +405,14 @@
       clearTimeout(aliveTimer);   // приложение отозвалось — запасной путь не нужен
       if (!appAlive) {
         appAlive = true;
-        try { localStorage.setItem('filmoteka-iframe-ok', '1'); localStorage.removeItem('filmoteka-iframe-fail'); } catch (e) { /* хранилище может быть закрыто */ }
+        try {
+          if (TOKEN_MODE) {
+            localStorage.setItem('filmoteka-open-ok', '1');
+            // не iPhone/Safari/Firefox, а сюда пришли после сбоя основного — запомним
+            if (!NO_IFRAME) localStorage.setItem('filmoteka-use-open', '1');
+          }
+          else { localStorage.setItem('filmoteka-iframe-ok', '1'); localStorage.removeItem('filmoteka-iframe-fail'); }
+        } catch (e) { /* хранилище может быть закрыто */ }
         if (fallbackShown) {      // приложение всё-таки ожило — возвращаем его на экран
           fallbackShown = false;
           document.getElementById('fallback').classList.remove('show');
@@ -366,6 +435,12 @@
           break;
         case 'logout':
           if (gisReady) google.accounts.id.disableAutoSelect();
+          // вход по токену: после выхода — новый токен (старый больше ни к чему не привязан)
+          if (TOKEN_MODE) { FRAME_SRC = openSrc(sessionToken(true)); }
+          break;
+        case 'reload':
+          // вход по токену: владелец вошёл — страница нужна заново, уже с кнопками редактора
+          if (TOKEN_MODE) { hideLogin(); reloadFrame(); }
           break;
       }
     });
@@ -374,6 +449,11 @@
       if (!nonce) return;
       pendingNonce = nonce;
       overlay.classList.add('show');
+      if (IN_APP) {
+        document.getElementById('authInApp').hidden = false;
+        document.getElementById('authSafari').setAttribute('href',
+          'x-safari-' + location.origin + location.pathname + (LINK_QUERY ? '?' + LINK_QUERY : ''));
+      }
       send({ type: 'login-shown' });
       setStatus(error, !!error);
       if (!configured) { setStatus('Вход ещё не настроен: в обёртке не заполнены APP_URL и CLIENT_ID', true); return; }
@@ -425,7 +505,7 @@
       retried = false;
       document.getElementById('fallback').classList.remove('show');
       frame.style.display = '';
-      frame.src = APP_SRC + (APP_SRC.indexOf('?') === -1 ? '?' : '&') + 'r=' + Date.now();
+      reloadFrame();
       armAliveTimer(20000);
     });
 
@@ -471,11 +551,13 @@
       document.body.insertAdjacentHTML('beforeend',
         '<p style="color:#fff;font-family:sans-serif;padding:24px;position:relative;">' +
         'Обёртка не настроена: впишите APP_URL и CLIENT_ID в index.html.</p>');
-    } else if (NO_IFRAME && !iframeKnown && !FORCE_FRAME) {
+    } else if (NO_IFRAME && !iframeKnown && !FORCE_FRAME && !TOKEN_MODE) {
       startDirect();
     } else {
-      const known = iframeKnown;
-      frame.src = APP_SRC;
+      // вход по токену: «уже открывался» считаем отдельно — основной адрес тут не годится
+      let known = iframeKnown;
+      if (TOKEN_MODE) { try { known = localStorage.getItem('filmoteka-open-ok') === '1'; } catch (e) { known = false; } }
+      frame.src = FRAME_SRC;
       // В браузере, где сайт внутри страницы уже не открывался (Safari на iPhone),
       // запасной вход показываем через несколько секунд, а не через полминуты
       armAliveTimer(known ? 25000 : (failedBefore ? 6000 : 12000));
